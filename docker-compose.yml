@@ -1,0 +1,75 @@
+# onvif-events-bridge
+#
+# Two services:
+#   onvif-camera  the virtual ONVIF camera (upstream onvif-server) WITH the
+#                 Events service built in. Protect talks to this.
+#   mqtt-bridge   subscribes to your detection topics and drives the motion level.
+#
+# NETWORKING — the important part
+# ------------------------------------------------------------------------------
+# The camera needs its own IP and MAC on your LAN, because Protect adopts it as a
+# distinct device. That means a macvlan network. Two consequences:
+#
+#   * The Docker host CANNOT reach its own macvlan children. That is normal and
+#     does not affect Protect (a separate machine). Never test reachability from
+#     the Docker host — you will get a false negative.
+#   * Because of the above, the mqtt-bridge is ALSO placed on the macvlan, so it
+#     can reach the camera's trigger endpoint. A bridge-network container cannot.
+#
+# Replace the placeholders below to match your LAN before first run:
+#   MACVLAN_PARENT   host NIC carrying your LAN (e.g. eth0, ens18, bond0)
+#   LAN_SUBNET       your LAN subnet, e.g. 10.0.0.0/24
+#   LAN_GATEWAY      your LAN gateway, e.g. 10.0.0.1
+#   CAMERA_IP        free LAN IP for the camera   (also set as onvif.host in config.yaml)
+#   BRIDGE_IP        free LAN IP for the bridge
+#   CAMERA_MAC       any locally-administered MAC, e.g. 02:42:c0:a8:01:0a
+#
+# These are set in .env — see .env.example.
+
+services:
+  onvif-camera:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: onvif-events-bridge/onvif-camera:latest
+    container_name: onvif-camera
+    restart: unless-stopped
+    # onvif.yaml is upstream onvif-server's own config (your RTSP source, ports,
+    # camera name/UUID). Generate it with upstream's `--create-config`.
+    volumes:
+      - ./onvif.yaml:/onvif.yaml:ro
+    environment:
+      # Topic emitted for a detection. Leave unset unless you know why not.
+      - ONVIF_MOTION_TOPIC=${ONVIF_MOTION_TOPIC:-tns1:RuleEngine/CellMotionDetector/Motion}
+      - ONVIF_SUB_TIMEOUT_SECS=${ONVIF_SUB_TIMEOUT_SECS:-60}
+    networks:
+      lan:
+        ipv4_address: ${CAMERA_IP}
+    mac_address: ${CAMERA_MAC}
+
+  mqtt-bridge:
+    build:
+      context: .
+      dockerfile: src/mqtt-bridge/Dockerfile
+    image: onvif-events-bridge/mqtt-bridge:latest
+    container_name: onvif-events-mqtt-bridge
+    restart: unless-stopped
+    depends_on:
+      - onvif-camera
+    env_file:
+      - .env
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+    networks:
+      lan:
+        ipv4_address: ${BRIDGE_IP}
+
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: ${MACVLAN_PARENT}
+    ipam:
+      config:
+        - subnet: ${LAN_SUBNET}
+          gateway: ${LAN_GATEWAY}

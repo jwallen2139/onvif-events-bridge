@@ -1,0 +1,20 @@
+# Secrets and local config
+.env
+config.yaml
+# upstream onvif-server's own config — contains your RTSP URL / stream token
+onvif.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime
+*.log

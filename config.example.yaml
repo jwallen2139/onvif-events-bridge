@@ -1,0 +1,58 @@
+# onvif-events-bridge configuration
+# Copy to config.yaml and edit. Secrets (passwords) go in .env, referenced as ${VAR}.
+#
+# This file is read by the mqtt-bridge service. Networking placeholders for the
+# virtual camera itself (its LAN IP/MAC, the macvlan parent) live in .env, because
+# docker-compose.yml needs them before any container starts.
+
+mqtt:
+  host: mqtt.example.lan       # your MQTT broker (hostname or IP)
+  port: 1883
+  username: ${MQTT_USERNAME}   # from .env
+  password: ${MQTT_PASSWORD}   # from .env
+  client_id: onvif-events-bridge
+
+# How the bridge reaches the ONVIF Events service.
+#
+# The Events service does NOT run as its own container — it is built into the
+# virtual camera image (see Dockerfile) and answers on the camera's own address
+# and ONVIF port. So `host` here is the camera's LAN IP (the CAMERA_IP you set in
+# .env), and `port` is the ONVIF port from your onvif.yaml.
+onvif:
+  host: 192.0.2.10             # = CAMERA_IP from .env (the virtual camera's LAN IP)
+  port: 8081                   # ONVIF service port, from your onvif-server onvif.yaml
+  # The ONVIF topic emitted for a detection. UniFi Protect files this as a motion
+  # event. This is applied on the CAMERA container via the ONVIF_MOTION_TOPIC
+  # environment variable (see docker-compose.yml) — it is listed here for
+  # reference only; changing it in this file has no effect.
+  # motion_topic: "tns1:RuleEngine/CellMotionDetector/Motion"
+
+# One or more detection sources. Each maps MQTT input onto the single motion level.
+# The camera's motion goes ON when ANY source is active, OFF when ALL are clear.
+sources:
+  # --- Example: Frigate person detection (see examples/frigate-person) ---
+  # type 'frigate' parses Frigate's events JSON, filters on camera + label,
+  # ignores false positives, and reference-counts overlapping event ids.
+  - name: frigate_person
+    type: frigate
+    topic: "frigate/events"    # Frigate's events topic (match your topic_prefix)
+    camera: driveway           # Frigate camera name to watch (required for 'frigate')
+    label: person              # only this object label counts (optional; omit for any)
+
+  # --- Example: a plain ON/OFF topic (see examples/frigate-audio) ---
+  # type 'onoff' accepts ON/OFF, on/off, true/false, 1/0, yes/no.
+  # Frigate's audio topics are exactly this shape, as is most anything else.
+  # MQTT wildcards (+ and #) are supported in `topic`.
+  # - name: nursery_crying
+  #   type: onoff
+  #   topic: "frigate/nursery/audio/crying"
+
+# Safety: force motion OFF this many seconds after it went ON if no 'end' arrives,
+# so a missed 'end' message can never wedge the level on. 0 disables (not recommended).
+max_motion_seconds: 60
+
+log_level: info                # debug | info | warning | error
+
+# Optional: also write logs to a file inside the container (rotating, 2 MB x 3).
+# Mount a volume if you want them on the host. Omit for stdout-only.
+# log_file: /config/bridge.log
