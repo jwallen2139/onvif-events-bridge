@@ -43,6 +43,13 @@ let subscriptions = {};
 let motionState = false;
 let subCounter = 0;
 
+// Pull/Renew for a subscription id we don't know (typically because this process restarted and
+// lost its in-memory map while the client kept its subscription address) re-creates that
+// subscription instead of answering with an empty success forever. Only ids of the form we hand
+// out ("sub<N>") are revived, and the total is capped so junk ids can't pile up.
+const MAX_SUBSCRIPTIONS = parseInt(process.env.ONVIF_MAX_SUBSCRIPTIONS || '32', 10);
+const SUB_ID_RE = /^sub(\d{1,9})$/;
+
 const NS =
     'xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope" ' +
     'xmlns:wsa="http://www.w3.org/2005/08/addressing" ' +
@@ -124,6 +131,43 @@ function reapSubscriptions() {
     }
 }
 
+// Keep at most MAX_SUBSCRIPTIONS, dropping the ones closest to (or furthest past) expiry first.
+function enforceSubscriptionCap() {
+    const ids = Object.keys(subscriptions);
+    if (ids.length <= MAX_SUBSCRIPTIONS) return;
+    ids.sort((a, b) => subscriptions[a].termination - subscriptions[b].termination);
+    for (const id of ids.slice(0, ids.length - MAX_SUBSCRIPTIONS)) {
+        delete subscriptions[id];
+        console.log('[EVENTS] dropped subscription ' + id + ' (cap ' + MAX_SUBSCRIPTIONS + ')');
+    }
+}
+
+/**
+ * Return the subscription for subId, re-creating it if it is unknown but well-formed.
+ * A revived subscription is seeded with the current motion state, exactly like a new one,
+ * so the client learns the level on its next pull. It then lives and expires like any other.
+ */
+function getOrReviveSubscription(subId) {
+    if (!subId) return undefined;
+    subId = String(subId);
+    if (subscriptions[subId]) return subscriptions[subId];
+    const m = SUB_ID_RE.exec(subId);
+    if (!m) return undefined;
+    reapSubscriptions();
+    const now = Date.now();
+    subscriptions[subId] = {
+        created: now, termination: now + SUB_TIMEOUT_MS, revived: true,
+        queue: [motionMessage(motionState, now)]
+    };
+    // Never hand this id out again to a different client.
+    subCounter = Math.max(subCounter, parseInt(m[1], 10));
+    enforceSubscriptionCap();
+    console.log('[EVENTS] revived unknown subscription ' + subId + ' (seeded IsMotion=' + motionState + ')');
+    return subscriptions[subId];
+}
+
+setInterval(reapSubscriptions, 60 * 1000).unref();
+
 function createPullPoint(config) {
     reapSubscriptions();
     const id = 'sub' + (++subCounter);
@@ -132,6 +176,7 @@ function createPullPoint(config) {
     // Seed with the current state so a fresh subscriber learns it immediately
     // instead of waiting for the next edge.
     subscriptions[id].queue.push(motionMessage(motionState, now));
+    enforceSubscriptionCap();
     const addr = 'http://' + config.hostname + ':' + config.ports.server +
                  '/onvif/events_service?sub=' + id;
     console.log('[EVENTS] CreatePullPointSubscription -> ' + id);
@@ -145,7 +190,7 @@ function createPullPoint(config) {
 
 function pullMessages(subId) {
     const now = Date.now();
-    const sub = subscriptions[subId];
+    const sub = getOrReviveSubscription(subId);
     const msgs = sub ? sub.queue.splice(0, 10) : [];
     if (msgs.length) console.log('[EVENTS] PullMessages ' + subId + ' -> ' + msgs.length + ' message(s)');
     if (sub) sub.termination = now + SUB_TIMEOUT_MS;
@@ -159,7 +204,8 @@ function pullMessages(subId) {
 
 function renew(subId) {
     const now = Date.now();
-    if (subscriptions[subId]) subscriptions[subId].termination = now + SUB_TIMEOUT_MS;
+    const sub = getOrReviveSubscription(subId);
+    if (sub) sub.termination = now + SUB_TIMEOUT_MS;
     return envelope(
         '<wsnt:RenewResponse>' +
         '<wsnt:CurrentTime>' + iso(now) + '</wsnt:CurrentTime>' +
